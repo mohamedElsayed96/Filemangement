@@ -57,7 +57,7 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
                 })
                 .bufferUntil(buffer -> {
                     uploadState.partBuffered += buffer.readableByteCount();
-                    uploadState.sizeBuffered += uploadState.partBuffered;
+                    uploadState.sizeBuffered += buffer.readableByteCount();
                     if (uploadState.partBuffered >= minioClientConfig.getMultipartMinPartSize()) {
                         log.info("[I173] bufferUntil: returning true, sizeBuffered= {}, bufferedBytes={}, partCounter={}, uploadId={}", uploadState.sizeBuffered, uploadState.partBuffered, uploadState.partCounter, uploadState.uploadId);
                         uploadState.partBuffered = 0;
@@ -67,7 +67,7 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
                     }
                 })
                 .flatMap(dataBuffers -> {
-                    if (uploadState.sizeBuffered >= minioClientConfig.getMaxFileSize()) {
+                    if (uploadState.sizeBuffered > minioClientConfig.getMaxFileSize()) {
                         return Mono.when(abortMultipartUpload(uploadState)).then(Mono.error(new UploadFileExceededMaxAllowedSizeException(fileMetaData)));
                     }
                     return Mono.just(dataBuffers);

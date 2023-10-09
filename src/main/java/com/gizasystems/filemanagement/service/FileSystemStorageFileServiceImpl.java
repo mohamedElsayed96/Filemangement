@@ -13,6 +13,7 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.core.io.buffer.DefaultDataBufferFactory;
 import org.springframework.http.HttpHeaders;
@@ -25,11 +26,14 @@ import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
 import org.springframework.http.codec.multipart.FilePart;
+import reactor.util.function.Tuple2;
+
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.Map;
 import java.util.UUID;
 
@@ -45,15 +49,29 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
     @Override
     public Mono<ResourceCreated> uploadFile(UUID fileId, Map<String, String> fileMetaData, Flux<DataBuffer> partEventFlux) {
         var uploadState = new UploadState(fileId.toString());
-        return partEventFlux
-                .reduce((dataBuffer, dataBuffer2) -> {
-                    uploadState.sizeBuffered += dataBuffer.readableByteCount();
-                    if (uploadState.sizeBuffered > fileSystemConfig.getMaxFileSize()) {
-                        DataBufferUtils.release(dataBuffer);
-                        throw new UploadFileExceededMaxAllowedSizeException(fileMetaData);
-                    }
-                    return dataBuffer.write(dataBuffer2);
-                })
+        var filename = fileId.toString();
+        var metaFilename = fileId + "_meta.txt";
+        var backUpFilename = fileId + ".old";
+        var backUpMetaFileName = fileId + ".old";
+
+        Path filePath = Paths.get(fileSystemConfig.getStoragePath(), filename);
+        Path metafilePath = Paths.get(fileSystemConfig.getStoragePath(),  metaFilename);
+
+        var oldFile = filePath.toFile();
+        var oldMetaFile = metafilePath.toFile();
+
+        if (oldFile.exists()) {
+            File newFile = new File(oldFile.getParent(), backUpFilename);
+            oldFile.renameTo(newFile);
+        }
+        if (oldMetaFile.exists()) {
+            File newFile = new File(oldMetaFile.getParent(), backUpMetaFileName);
+            oldMetaFile.renameTo(newFile);
+        }
+
+        return DataBufferUtils
+                .join(partEventFlux, fileSystemConfig.getMaxFileSize())
+                .publishOn(Schedulers.boundedElastic())
                 .flatMap(dataBuffer -> {
                     byte[] bytes = new byte[dataBuffer.readableByteCount()];
 
@@ -65,18 +83,41 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
                     dataBuffer.read(bytes);
                     DataBufferUtils.release(dataBuffer);
                     try {
-                        Path filePath = Paths.get(fileSystemConfig.getStoragePath(), fileId.toString());
-                        Path metafilePath = Paths.get(fileSystemConfig.getStoragePath(), fileId + "_meta.txt");
-                        objectMapper.writeValue(metafilePath.toFile(), metafilePath);
-                        Files.write(filePath, bytes);
+                        Files.write(filePath, bytes, StandardOpenOption.CREATE_NEW);
                     } catch (IOException e) {
                         log.error(e.getMessage(), e);
                         return Mono.error(e);
                     }
                     return Mono.just(new ResourceCreated(fileId.toString()));
+                }).zipWith(Mono.fromCallable(() -> {
+                    try {
+                        metafilePath.toFile().createNewFile();
+                        objectMapper.writeValue(metafilePath.toFile(), fileMetaData);
+
+                    } catch (IOException e) {
+                        return Mono.error(e);
+                    }
+                    return true;
+                }))
+                .map(Tuple2::getT1)
+                .doOnSuccess(resourceCreated -> {
+                    File backupFile = new File(oldFile.getParent(), backUpFilename);
+                    File backupMetaFile = new File(oldMetaFile.getParent(), backUpMetaFileName);
+                    if(backupFile.exists()) backupFile.delete();
+                    if(backupMetaFile.exists()) backupMetaFile.delete();
+
+                })
+                .onErrorResume(ex -> {
+                    if (ex instanceof DataBufferLimitException) {
+                        return Mono.error(new UploadFileExceededMaxAllowedSizeException(fileMetaData));
+                    }
+                    return Mono.error(ex);
+
                 });
 
+
     }
+
 
     static class UploadState {
         final String fileKey;
@@ -92,12 +133,13 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
     public Mono<ResponseEntity<Flux<ByteBuffer>>> downloadFile(UUID fileId) {
         Path metaFilePath = Paths.get(fileSystemConfig.getStoragePath(), fileId + "_meta.txt");
         Path filePath = Paths.get(fileSystemConfig.getStoragePath(), fileId.toString());
-        var metaData = objectMapper.readValue(metaFilePath.toFile(), new TypeReference<Map<String, String>>() {
-        });
+
         Resource resource = new FileSystemResource(filePath.toFile());
-        var fileSize = metaData.get("file_size");
         if (resource.exists() || resource.isReadable()) {
-             var responseBody = DataBufferUtils.read(resource, new DefaultDataBufferFactory(), 1024).map(dataBuffer -> {
+            var metaData = objectMapper.readValue(metaFilePath.toFile(), new TypeReference<Map<String, String>>() {
+            });
+            var fileSize = metaData.get("file_size");
+            var responseBody = DataBufferUtils.read(resource, new DefaultDataBufferFactory(), 1024).map(dataBuffer -> {
 
                 ByteBuffer partData = ByteBuffer.allocate(1024);
                 dataBuffer.toByteBuffer(partData);
