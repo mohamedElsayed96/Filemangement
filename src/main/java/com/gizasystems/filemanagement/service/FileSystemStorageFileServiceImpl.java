@@ -47,6 +47,7 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
     private final ObjectMapper objectMapper;
 
     @Override
+    @SneakyThrows
     public Mono<ResourceCreated> uploadFile(UUID fileId, Map<String, String> fileMetaData, Flux<DataBuffer> partEventFlux) {
         var uploadState = new UploadState(fileId.toString());
         var filename = fileId.toString();
@@ -55,7 +56,7 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
         var backUpMetaFileName = fileId + ".old";
 
         Path filePath = Paths.get(fileSystemConfig.getStoragePath(), filename);
-        Path metafilePath = Paths.get(fileSystemConfig.getStoragePath(),  metaFilename);
+        Path metafilePath = Paths.get(fileSystemConfig.getStoragePath(), metaFilename);
 
         var oldFile = filePath.toFile();
         var oldMetaFile = metafilePath.toFile();
@@ -69,27 +70,16 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
             oldMetaFile.renameTo(newFile);
         }
 
-        return DataBufferUtils
-                .join(partEventFlux, fileSystemConfig.getMaxFileSize())
-                .publishOn(Schedulers.boundedElastic())
-                .flatMap(dataBuffer -> {
-                    byte[] bytes = new byte[dataBuffer.readableByteCount()];
-
-                    if (bytes.length > fileSystemConfig.getMaxFileSize()) {
+        var outputStream = new FileOutputStream(filePath.toString());
+        return DataBufferUtils.write(partEventFlux, outputStream).flatMap(dataBuffer -> {
+                    uploadState.sizeBuffered += dataBuffer.readableByteCount();
+                    if (uploadState.sizeBuffered > fileSystemConfig.getMaxFileSize()) {
                         DataBufferUtils.release(dataBuffer);
                         return Mono.error(new UploadFileExceededMaxAllowedSizeException(fileMetaData));
                     }
-                    fileMetaData.put("file_size", uploadState.sizeBuffered + "");
-                    dataBuffer.read(bytes);
-                    DataBufferUtils.release(dataBuffer);
-                    try {
-                        Files.write(filePath, bytes, StandardOpenOption.CREATE_NEW);
-                    } catch (IOException e) {
-                        log.error(e.getMessage(), e);
-                        return Mono.error(e);
-                    }
                     return Mono.just(new ResourceCreated(fileId.toString()));
-                }).zipWith(Mono.fromCallable(() -> {
+                }).reduce((o, o2) -> new ResourceCreated(fileId.toString()))
+                .zipWith(Mono.fromCallable(() -> {
                     try {
                         metafilePath.toFile().createNewFile();
                         objectMapper.writeValue(metafilePath.toFile(), fileMetaData);
@@ -98,35 +88,33 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
                         return Mono.error(e);
                     }
                     return true;
-                }))
-                .map(Tuple2::getT1)
-                .doOnSuccess(resourceCreated -> {
+                })).map(Tuple2::getT1).doOnSuccess(resourceCreated -> {
                     File backupFile = new File(oldFile.getParent(), backUpFilename);
                     File backupMetaFile = new File(oldMetaFile.getParent(), backUpMetaFileName);
-                    if(backupFile.exists()) backupFile.delete();
-                    if(backupMetaFile.exists()) backupMetaFile.delete();
-
+                    if (backupFile.exists()) backupFile.delete();
+                    if (backupMetaFile.exists()) backupMetaFile.delete();
                 })
                 .onErrorResume(ex -> {
+
                     if (ex instanceof DataBufferLimitException) {
                         return Mono.error(new UploadFileExceededMaxAllowedSizeException(fileMetaData));
                     }
                     return Mono.error(ex);
 
+                })
+                .publishOn(Schedulers.boundedElastic()).doFinally(signalType -> {
+                    try {
+                        outputStream.close();
+                    } catch (IOException e) {
+                        log.error(e.getMessage(), e);
+                        throw new RuntimeException(e);
+                    }
                 });
 
-
     }
 
 
-    static class UploadState {
-        final String fileKey;
-        long sizeBuffered = 0;
 
-        UploadState(String fileKey) {
-            this.fileKey = fileKey;
-        }
-    }
 
     @Override
     @SneakyThrows
@@ -153,5 +141,14 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
                     .body(responseBody));
         }
         throw new FileNotFoundException();
+    }
+
+    static class UploadState {
+        final String fileKey;
+        long sizeBuffered = 0;
+
+        UploadState(String fileKey) {
+            this.fileKey = fileKey;
+        }
     }
 }
