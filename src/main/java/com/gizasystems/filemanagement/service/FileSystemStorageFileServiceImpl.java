@@ -2,7 +2,9 @@ package com.gizasystems.filemanagement.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.gizasystems.filemanagement.exceptions.FileAlreadyExistException;
 import com.gizasystems.filemanagement.exceptions.FileNotFoundException;
+import com.gizasystems.filemanagement.exceptions.UploadFailedException;
 import com.gizasystems.filemanagement.exceptions.UploadFileExceededMaxAllowedSizeException;
 import com.gizasystems.filemanagement.infrastructure.FileSystemConfig;
 import com.gizasystems.filemanagement.models.ResourceCreated;
@@ -17,23 +19,19 @@ import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.core.io.buffer.DefaultDataBufferFactory;
 import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
-import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
-
-import org.springframework.http.codec.multipart.FilePart;
 import reactor.util.function.Tuple2;
 
-import java.io.*;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
 import java.util.Map;
 import java.util.UUID;
 
@@ -50,27 +48,26 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
     @SneakyThrows
     public Mono<ResourceCreated> uploadFile(UUID fileId, Map<String, String> fileMetaData, Flux<DataBuffer> partEventFlux) {
         var uploadState = new UploadState(fileId.toString());
+
         var filename = fileId.toString();
         var metaFilename = fileId + "_meta.txt";
-        var backUpFilename = fileId + ".old";
-        var backUpMetaFileName = fileId + ".old";
+
 
         Path filePath = Paths.get(fileSystemConfig.getStoragePath(), filename);
-        Path metafilePath = Paths.get(fileSystemConfig.getStoragePath(), metaFilename);
+        Path metafilePath = Paths.get(fileSystemConfig.getMetaStoragePath(), metaFilename);
 
-        var oldFile = filePath.toFile();
-        var oldMetaFile = metafilePath.toFile();
+        var file = new File(filePath.toString());
+        var metaFile = new File(metafilePath.toString());
 
-        if (oldFile.exists()) {
-            File newFile = new File(oldFile.getParent(), backUpFilename);
-            oldFile.renameTo(newFile);
-        }
-        if (oldMetaFile.exists()) {
-            File newFile = new File(oldMetaFile.getParent(), backUpMetaFileName);
-            oldMetaFile.renameTo(newFile);
+
+        if (file.exists() || metaFile.exists()) {
+            log.error("Upload Failed: Failed to rename existing file with the same id {}", fileId);
+            throw new FileAlreadyExistException();
         }
 
         var outputStream = new FileOutputStream(filePath.toString());
+        var metaOutputStream = new FileOutputStream(metafilePath.toString());
+
         return DataBufferUtils.write(partEventFlux, outputStream).flatMap(dataBuffer -> {
                     uploadState.sizeBuffered += dataBuffer.readableByteCount();
                     if (uploadState.sizeBuffered > fileSystemConfig.getMaxFileSize()) {
@@ -81,45 +78,37 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
                 }).reduce((o, o2) -> new ResourceCreated(fileId.toString()))
                 .zipWith(Mono.fromCallable(() -> {
                     try {
-                        metafilePath.toFile().createNewFile();
-                        objectMapper.writeValue(metafilePath.toFile(), fileMetaData);
-
+                        objectMapper.writeValue(metaOutputStream, fileMetaData);
                     } catch (IOException e) {
-                        return Mono.error(e);
+                        log.error(e.getMessage(), e);
+                        throw new UploadFailedException();
                     }
                     return true;
-                })).map(Tuple2::getT1).doOnSuccess(resourceCreated -> {
-                    File backupFile = new File(oldFile.getParent(), backUpFilename);
-                    File backupMetaFile = new File(oldMetaFile.getParent(), backUpMetaFileName);
-                    if (backupFile.exists()) backupFile.delete();
-                    if (backupMetaFile.exists()) backupMetaFile.delete();
-                })
+                })).map(Tuple2::getT1)
                 .onErrorResume(ex -> {
-
-                    if (ex instanceof DataBufferLimitException) {
-                        return Mono.error(new UploadFileExceededMaxAllowedSizeException(fileMetaData));
-                    }
+                    if (file.exists()) file.delete();
+                    if (metaFile.exists()) metaFile.delete();
                     return Mono.error(ex);
 
                 })
-                .publishOn(Schedulers.boundedElastic()).doFinally(signalType -> {
+                .publishOn(Schedulers.boundedElastic())
+                .doFinally(signalType -> {
                     try {
                         outputStream.close();
+                        metaOutputStream.close();
                     } catch (IOException e) {
                         log.error(e.getMessage(), e);
-                        throw new RuntimeException(e);
+                        throw new UploadFailedException();
                     }
                 });
 
     }
 
 
-
-
     @Override
     @SneakyThrows
     public Mono<ResponseEntity<Flux<ByteBuffer>>> downloadFile(UUID fileId) {
-        Path metaFilePath = Paths.get(fileSystemConfig.getStoragePath(), fileId + "_meta.txt");
+        Path metaFilePath = Paths.get(fileSystemConfig.getMetaStoragePath(), fileId + "_meta.txt");
         Path filePath = Paths.get(fileSystemConfig.getStoragePath(), fileId.toString());
 
         Resource resource = new FileSystemResource(filePath.toFile());

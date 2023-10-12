@@ -17,6 +17,7 @@ public enum ErrorCodes {
     ERROR_FM_006("ERROR_FM_006", "File not found"),
     ERROR_FM_007("ERROR_FM_007", "Access Denied to this File"),
     ERROR_FM_008("ERROR_FM_008", "Delete File Failed"),
+    ERROR_FM_009("ERROR_FM_009", "File Already Exist"),
     ;
 
 

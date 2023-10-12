@@ -1,8 +1,6 @@
 package com.gizasystems.filemanagement.service;
 
-import com.gizasystems.filemanagement.exceptions.DownloadFailedException;
-import com.gizasystems.filemanagement.exceptions.UploadFailedException;
-import com.gizasystems.filemanagement.exceptions.UploadFileExceededMaxAllowedSizeException;
+import com.gizasystems.filemanagement.exceptions.*;
 import com.gizasystems.filemanagement.infrastructure.MinioClientConfig;
 import com.gizasystems.filemanagement.models.ResourceCreated;
 import lombok.RequiredArgsConstructor;
@@ -36,57 +34,6 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
     private final S3AsyncClient s3Client;
     private final MinioClientConfig minioClientConfig;
 
-    public Mono<ResourceCreated> uploadFile(UUID fileId, Map<String, String> fileMetaData, Flux<DataBuffer> partEventFlux) {
-        var fileKey = fileId.toString();
-        log.info("inside filePart");
-        var uploadState = new UploadState(minioClientConfig.getBucketName(), fileKey);
-        var mimeType = fileMetaData.get("mime_type");
-        CompletableFuture<CreateMultipartUploadResponse> uploadRequest = s3Client
-                .createMultipartUpload(CreateMultipartUploadRequest.builder()
-                        .contentType(mimeType)
-                        .key(fileKey)
-                        .metadata(fileMetaData)
-                        .bucket(minioClientConfig.getBucketName())
-                        .build());
-        return Mono
-                .fromFuture(uploadRequest)
-                .flatMapMany(response -> {
-                    checkResult(response, uploadState.fileKey);
-                    uploadState.uploadId = response.uploadId();
-                    return partEventFlux;
-                })
-                .bufferUntil(buffer -> {
-                    uploadState.partBuffered += buffer.readableByteCount();
-                    uploadState.sizeBuffered += buffer.readableByteCount();
-                    if (uploadState.partBuffered >= minioClientConfig.getMultipartMinPartSize()) {
-                        log.info("[I173] bufferUntil: returning true, sizeBuffered= {}, bufferedBytes={}, partCounter={}, uploadId={}", uploadState.sizeBuffered, uploadState.partBuffered, uploadState.partCounter, uploadState.uploadId);
-                        uploadState.partBuffered = 0;
-                        return true;
-                    } else {
-                        return false;
-                    }
-                })
-                .flatMap(dataBuffers -> {
-                    if (uploadState.sizeBuffered > minioClientConfig.getMaxFileSize()) {
-                        return Mono.when(abortMultipartUpload(uploadState)).then(Mono.error(new UploadFileExceededMaxAllowedSizeException(fileMetaData)));
-                    }
-                    return Mono.just(dataBuffers);
-                })
-                .map(S3StorageFileSystemImpl::concatBuffers)
-                .flatMap(buffer -> uploadPart(uploadState, buffer))
-                .reduce(uploadState, (state, completedPart) -> {
-                    state.completedParts.put(completedPart.partNumber(), completedPart);
-                    return state;
-                })
-                .flatMap(this::completeUpload)
-                .map(response -> {
-                    checkResult(response, uploadState.fileKey);
-                    return uploadState.fileKey;
-                }).flatMap(s -> Mono.just(new ResourceCreated(s)));
-
-
-    }
-
     private static ByteBuffer concatBuffers(List<DataBuffer> buffers) {
         log.info("[I198] creating BytBuffer from {} chunks", buffers.size());
 
@@ -104,6 +51,82 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
 
         log.info("[I208] partData: size={}", partData.capacity());
         return partData;
+
+    }
+
+    // Helper used to check return codes from an API call
+    private static void checkResult(GetObjectResponse response, String fileId) {
+        SdkHttpResponse sdkResponse = response.sdkHttpResponse();
+        if (sdkResponse != null && sdkResponse.isSuccessful()) {
+            return;
+        }
+        if (sdkResponse != null) {
+            log.error("file_id---> {} Failed To be Download due to {} with status {}", fileId, sdkResponse.statusText().orElse("Unknown Error"), sdkResponse.statusCode());
+        } else {
+            log.error("file_id---> {} Failed To be Download due to Unknown Error", fileId);
+
+        }
+        throw new DownloadFailedException();
+    }
+
+    public Mono<ResourceCreated> uploadFile(UUID fileId, Map<String, String> fileMetaData, Flux<DataBuffer> partEventFlux) {
+        var fileKey = fileId.toString();
+        log.info("inside filePart");
+        var uploadState = new UploadState(minioClientConfig.getBucketName(), fileKey);
+        var mimeType = fileMetaData.get("mime_type");
+        HeadObjectRequest headObjectRequest = HeadObjectRequest.builder()
+                .bucket(minioClientConfig.getBucketName())
+                .key(fileKey)
+                .build();
+
+
+        CompletableFuture<CreateMultipartUploadResponse> uploadRequest = s3Client
+                .createMultipartUpload(CreateMultipartUploadRequest.builder()
+                        .contentType(mimeType)
+                        .key(fileKey)
+                        .metadata(fileMetaData)
+                        .bucket(minioClientConfig.getBucketName())
+                        .build());
+        return Mono
+                .fromFuture(s3Client.headObject(headObjectRequest)).doOnError(throwable -> {
+                    log.error(throwable.getMessage(), throwable);
+                    throw new FileAlreadyExistException();
+                }).then(
+                        Mono.fromFuture(uploadRequest)
+                                .flatMapMany(response -> {
+                                    checkResult(response, uploadState.fileKey);
+                                    uploadState.uploadId = response.uploadId();
+                                    return partEventFlux;
+                                })
+                                .bufferUntil(buffer -> {
+                                    uploadState.partBuffered += buffer.readableByteCount();
+                                    uploadState.sizeBuffered += buffer.readableByteCount();
+                                    if (uploadState.partBuffered >= minioClientConfig.getMultipartMinPartSize()) {
+                                        log.info("[I173] bufferUntil: returning true, sizeBuffered= {}, bufferedBytes={}, partCounter={}, uploadId={}", uploadState.sizeBuffered, uploadState.partBuffered, uploadState.partCounter, uploadState.uploadId);
+                                        uploadState.partBuffered = 0;
+                                        return true;
+                                    } else {
+                                        return false;
+                                    }
+                                })
+                                .flatMap(dataBuffers -> {
+                                    if (uploadState.sizeBuffered > minioClientConfig.getMaxFileSize()) {
+                                        return Mono.when(abortMultipartUpload(uploadState)).then(Mono.error(new UploadFileExceededMaxAllowedSizeException(fileMetaData)));
+                                    }
+                                    return Mono.just(dataBuffers);
+                                })
+                                .map(S3StorageFileSystemImpl::concatBuffers)
+                                .flatMap(buffer -> uploadPart(uploadState, buffer))
+                                .reduce(uploadState, (state, completedPart) -> {
+                                    state.completedParts.put(completedPart.partNumber(), completedPart);
+                                    return state;
+                                })
+                                .flatMap(this::completeUpload)
+                                .map(response -> {
+                                    checkResult(response, uploadState.fileKey);
+                                    return uploadState.fileKey;
+                                }).flatMap(s -> Mono.just(new ResourceCreated(s))));
+
 
     }
 
@@ -164,7 +187,6 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
                 .build()));
     }
 
-
     /**
      * check result from an API call.
      *
@@ -186,22 +208,6 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
         throw new UploadFailedException();
 
 
-    }
-
-    static class UploadState {
-        final String bucket;
-        final String fileKey;
-
-        String uploadId;
-        int partCounter;
-        Map<Integer, CompletedPart> completedParts = new HashMap<>();
-        int partBuffered = 0;
-        long sizeBuffered = 0;
-
-        UploadState(String bucket, String fileKey) {
-            this.bucket = bucket;
-            this.fileKey = fileKey;
-        }
     }
 
     @Override
@@ -230,6 +236,12 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
                             .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
                             .body(Flux.from(response));
 
+                }).doOnError(throwable -> {
+                    log.error(throwable.getMessage(), throwable);
+                    if(throwable instanceof NoSuchKeyException){
+                        throw new FileNotFoundException();
+                    }
+                    throw new DownloadFailedException();
                 });
     }
 
@@ -244,18 +256,19 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
         return defaultValue;
     }
 
-    // Helper used to check return codes from an API call
-    private static void checkResult(GetObjectResponse response, String fileId) {
-        SdkHttpResponse sdkResponse = response.sdkHttpResponse();
-        if (sdkResponse != null && sdkResponse.isSuccessful()) {
-            return;
-        }
-        if (sdkResponse != null) {
-            log.error("file_id---> {} Failed To be Download due to {} with status {}", fileId, sdkResponse.statusText().orElse("Unknown Error"), sdkResponse.statusCode());
-        } else {
-            log.error("file_id---> {} Failed To be Download due to Unknown Error", fileId);
+    static class UploadState {
+        final String bucket;
+        final String fileKey;
 
+        String uploadId;
+        int partCounter;
+        Map<Integer, CompletedPart> completedParts = new HashMap<>();
+        int partBuffered = 0;
+        long sizeBuffered = 0;
+
+        UploadState(String bucket, String fileKey) {
+            this.bucket = bucket;
+            this.fileKey = fileKey;
         }
-        throw new DownloadFailedException();
     }
 }
