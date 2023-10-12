@@ -20,6 +20,11 @@ import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.UUID;
 
+/**
+ * Author: Mohamed Eid
+ * Date: October 1, 2023,
+ * Description: Handle upload file events.
+ */
 @RequiredArgsConstructor
 @Service
 @Log4j2

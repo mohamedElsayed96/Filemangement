@@ -26,6 +26,11 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
+/**
+ * Author: Mohamed Eid
+ * Date: October 1, 2023,
+ * Description: Implementation for S3 server.
+ */
 @Log4j2
 @Service
 @RequiredArgsConstructor
@@ -91,41 +96,41 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
                 .fromFuture(s3Client.headObject(headObjectRequest)).doOnError(throwable -> {
                     log.error(throwable.getMessage(), throwable);
                     throw new FileAlreadyExistException();
-                }).then(
-                        Mono.fromFuture(uploadRequest)
-                                .flatMapMany(response -> {
-                                    checkResult(response, uploadState.fileKey);
-                                    uploadState.uploadId = response.uploadId();
-                                    return partEventFlux;
-                                })
-                                .bufferUntil(buffer -> {
-                                    uploadState.partBuffered += buffer.readableByteCount();
-                                    uploadState.sizeBuffered += buffer.readableByteCount();
-                                    if (uploadState.partBuffered >= minioClientConfig.getMultipartMinPartSize()) {
-                                        log.info("[I173] bufferUntil: returning true, sizeBuffered= {}, bufferedBytes={}, partCounter={}, uploadId={}", uploadState.sizeBuffered, uploadState.partBuffered, uploadState.partCounter, uploadState.uploadId);
-                                        uploadState.partBuffered = 0;
-                                        return true;
-                                    } else {
-                                        return false;
-                                    }
-                                })
-                                .flatMap(dataBuffers -> {
-                                    if (uploadState.sizeBuffered > minioClientConfig.getMaxFileSize()) {
-                                        return Mono.when(abortMultipartUpload(uploadState)).then(Mono.error(new UploadFileExceededMaxAllowedSizeException(fileMetaData)));
-                                    }
-                                    return Mono.just(dataBuffers);
-                                })
-                                .map(S3StorageFileSystemImpl::concatBuffers)
-                                .flatMap(buffer -> uploadPart(uploadState, buffer))
-                                .reduce(uploadState, (state, completedPart) -> {
-                                    state.completedParts.put(completedPart.partNumber(), completedPart);
-                                    return state;
-                                })
-                                .flatMap(this::completeUpload)
-                                .map(response -> {
-                                    checkResult(response, uploadState.fileKey);
-                                    return uploadState.fileKey;
-                                }).flatMap(s -> Mono.just(new ResourceCreated(s))));
+                })
+                .then(Mono.fromFuture(uploadRequest)
+                        .flatMapMany(response -> {
+                            checkResult(response, uploadState.fileKey);
+                            uploadState.uploadId = response.uploadId();
+                            return partEventFlux;
+                        })
+                        .bufferUntil(buffer -> {
+                            uploadState.partBuffered += buffer.readableByteCount();
+                            uploadState.sizeBuffered += buffer.readableByteCount();
+                            if (uploadState.partBuffered >= minioClientConfig.getMultipartMinPartSize()) {
+                                log.info("[I173] bufferUntil: returning true, sizeBuffered= {}, bufferedBytes={}, partCounter={}, uploadId={}", uploadState.sizeBuffered, uploadState.partBuffered, uploadState.partCounter, uploadState.uploadId);
+                                uploadState.partBuffered = 0;
+                                return true;
+                            } else {
+                                return false;
+                            }
+                        })
+                        .flatMap(dataBuffers -> {
+                            if (uploadState.sizeBuffered > minioClientConfig.getMaxFileSize()) {
+                                return Mono.when(abortMultipartUpload(uploadState)).then(Mono.error(new UploadFileExceededMaxAllowedSizeException(fileMetaData)));
+                            }
+                            return Mono.just(dataBuffers);
+                        })
+                        .map(S3StorageFileSystemImpl::concatBuffers)
+                        .flatMap(buffer -> uploadPart(uploadState, buffer))
+                        .reduce(uploadState, (state, completedPart) -> {
+                            state.completedParts.put(completedPart.partNumber(), completedPart);
+                            return state;
+                        })
+                        .flatMap(this::completeUpload)
+                        .map(response -> {
+                            checkResult(response, uploadState.fileKey);
+                            return uploadState.fileKey;
+                        }).flatMap(s -> Mono.just(new ResourceCreated(s))));
 
 
     }
@@ -238,7 +243,7 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
 
                 }).doOnError(throwable -> {
                     log.error(throwable.getMessage(), throwable);
-                    if(throwable instanceof NoSuchKeyException){
+                    if (throwable instanceof NoSuchKeyException) {
                         throw new FileNotFoundException();
                     }
                     throw new DownloadFailedException();

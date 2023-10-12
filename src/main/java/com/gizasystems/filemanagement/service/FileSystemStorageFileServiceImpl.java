@@ -34,7 +34,11 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Map;
 import java.util.UUID;
-
+/**
+ * Author: Mohamed Eid
+ * Date: October 1, 2023,
+ * Description: Implementation for File System.
+ */
 @Profile({"filesystem"})
 @Service
 @RequiredArgsConstructor
@@ -61,7 +65,7 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
 
 
         if (file.exists() || metaFile.exists()) {
-            log.error("Upload Failed: Failed to rename existing file with the same id {}", fileId);
+            log.error("Upload Failed: Failed due to existing file with the same id {}", fileId);
             throw new FileAlreadyExistException();
         }
 
@@ -89,7 +93,6 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
                     if (file.exists()) file.delete();
                     if (metaFile.exists()) metaFile.delete();
                     return Mono.error(ex);
-
                 })
                 .publishOn(Schedulers.boundedElastic())
                 .doFinally(signalType -> {
