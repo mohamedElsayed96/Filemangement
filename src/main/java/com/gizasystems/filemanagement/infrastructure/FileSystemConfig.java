@@ -17,7 +17,7 @@ public class FileSystemConfig {
 
 
 
-    private int maxFileSize;
+    private long maxFileSize;
     private String storagePath;
     private String metaStoragePath;
 }

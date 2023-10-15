@@ -75,7 +75,7 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
 
         return DataBufferUtils.write(partEventFlux, outputStream).flatMap(dataBuffer -> {
                     uploadState.sizeBuffered += dataBuffer.readableByteCount();
-                    if (uploadState.sizeBuffered > fileSystemConfig.getMaxFileSize()) {
+                    if (uploadState.sizeBuffered > fileSystemConfig.getMaxFileSize() * Math.pow(1024, 2)) {
                         DataBufferUtils.release(dataBuffer);
                         return Mono.error(new UploadFileExceededMaxAllowedSizeException(fileMetaData));
                     }
@@ -90,12 +90,31 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
                     }
                     return true;
                 }).subscribeOn(Schedulers.boundedElastic())).map(Tuple2::getT1)
-                .onErrorResume(ex -> {
-                    if (file.exists()) file.delete();
-                    if (metaFile.exists()) metaFile.delete();
-                    return Mono.error(ex);
-                })
-                .publishOn(Schedulers.boundedElastic())
+                .onErrorResume(ex ->
+                        Mono.fromCallable(() -> {
+                            if (Files.exists(filePath)) {
+                                try {
+                                    outputStream.close();
+                                    Files.delete(filePath);
+                                } catch (IOException e) {
+                                    log.error(e.getMessage(), e);
+                                }
+                            }
+                            return true;
+
+                        }).subscribeOn(Schedulers.boundedElastic()).zipWith(Mono.fromCallable(() -> {
+                            if (Files.exists(metafilePath)) {
+                                try {
+                                    metaOutputStream.close();
+                                    Files.delete(metafilePath);
+                                } catch (IOException e) {
+                                    log.error(e.getMessage(), e);
+                                }
+                            }
+                            return true;
+                        }).subscribeOn(Schedulers.boundedElastic())).flatMap(objects -> Mono.error(ex))
+
+                )
                 .doFinally(signalType -> {
                     try {
                         outputStream.close();
@@ -156,11 +175,10 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
                 }).subscribeOn(Schedulers.boundedElastic()))
                 .onErrorResume(throwable -> {
                     log.error(throwable.getMessage(), throwable);
-                    if(throwable instanceof NoSuchFileException) throw new FileNotFoundException();
+                    if (throwable instanceof NoSuchFileException) throw new FileNotFoundException();
                     throw new DeleteFailedException();
                 })
                 .map(result -> new ResourceDeleted(true));
-
 
 
     }

@@ -9,12 +9,14 @@ import lombok.SneakyThrows;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.context.annotation.Profile;
 import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 import software.amazon.awssdk.core.SdkResponse;
 import software.amazon.awssdk.core.async.AsyncRequestBody;
 import software.amazon.awssdk.core.async.AsyncResponseTransformer;
@@ -51,12 +53,12 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
         }
 
         ByteBuffer partData = ByteBuffer.allocate(partSize);
-        buffers.forEach(buffer ->
-                partData.put(buffer.toByteBuffer()));
-
+        buffers.forEach(buffer -> {
+            partData.put(buffer.toByteBuffer());
+            DataBufferUtils.release(buffer);
+        });
         // Reset read pointer to first byte
         partData.rewind();
-
         log.info("[I208] partData: size={}", partData.capacity());
         return partData;
 
@@ -82,62 +84,41 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
         log.info("inside filePart");
         var uploadState = new UploadState(minioClientConfig.getBucketName(), fileKey);
         var mimeType = fileMetaData.get("mime_type");
-        HeadObjectRequest headObjectRequest = HeadObjectRequest.builder()
-                .bucket(minioClientConfig.getBucketName())
-                .key(fileKey)
-                .build();
+        HeadObjectRequest headObjectRequest = HeadObjectRequest.builder().bucket(minioClientConfig.getBucketName()).key(fileKey).build();
 
 
-        CompletableFuture<CreateMultipartUploadResponse> uploadRequest = s3Client
-                .createMultipartUpload(CreateMultipartUploadRequest.builder()
-                        .contentType(mimeType)
-                        .key(fileKey)
-                        .metadata(fileMetaData)
-                        .bucket(minioClientConfig.getBucketName())
-                        .build());
-        return Mono
-                .fromFuture(s3Client.headObject(headObjectRequest))
-                .flatMap(headObjectResponse -> {
-                   return Mono.error(new FileAlreadyExistException());
-                })
-                .onErrorResume(throwable -> {
-                     if(throwable instanceof FileAlreadyExistException ex) throw ex;
-                    return Mono.empty();
-                })
-                .then(Mono.fromFuture(uploadRequest)
-                        .flatMapMany(response -> {
-                            checkResult(response, uploadState.fileKey);
-                            uploadState.uploadId = response.uploadId();
-                            return partEventFlux;
-                        })
-                        .bufferUntil(buffer -> {
-                            uploadState.partBuffered += buffer.readableByteCount();
-                            uploadState.sizeBuffered += buffer.readableByteCount();
-                            if (uploadState.partBuffered >= minioClientConfig.getMultipartMinPartSize()) {
-                                log.info("[I173] bufferUntil: returning true, sizeBuffered= {}, bufferedBytes={}, partCounter={}, uploadId={}", uploadState.sizeBuffered, uploadState.partBuffered, uploadState.partCounter, uploadState.uploadId);
-                                uploadState.partBuffered = 0;
-                                return true;
-                            } else {
-                                return false;
-                            }
-                        })
-                        .flatMap(dataBuffers -> {
-                            if (uploadState.sizeBuffered > minioClientConfig.getMaxFileSize()) {
-                                return Mono.when(abortMultipartUpload(uploadState)).then(Mono.error(new UploadFileExceededMaxAllowedSizeException(fileMetaData)));
-                            }
-                            return Mono.just(dataBuffers);
-                        })
-                        .map(S3StorageFileSystemImpl::concatBuffers)
-                        .flatMap(buffer -> uploadPart(uploadState, buffer))
-                        .reduce(uploadState, (state, completedPart) -> {
-                            state.completedParts.put(completedPart.partNumber(), completedPart);
-                            return state;
-                        })
-                        .flatMap(this::completeUpload)
-                        .map(response -> {
-                            checkResult(response, uploadState.fileKey);
-                            return uploadState.fileKey;
-                        }).flatMap(s -> Mono.just(new ResourceCreated(s))));
+        CompletableFuture<CreateMultipartUploadResponse> uploadRequest = s3Client.createMultipartUpload(CreateMultipartUploadRequest.builder().contentType(mimeType).key(fileKey).metadata(fileMetaData).bucket(minioClientConfig.getBucketName()).build());
+        return Mono.fromFuture(s3Client.headObject(headObjectRequest)).flatMap(headObjectResponse -> {
+            return Mono.error(new FileAlreadyExistException());
+        }).onErrorResume(throwable -> {
+            if (throwable instanceof FileAlreadyExistException ex) throw ex;
+            return Mono.empty();
+        }).then(Mono.fromFuture(uploadRequest).flatMapMany(response -> {
+            checkResult(response, uploadState.fileKey);
+            uploadState.uploadId = response.uploadId();
+            return partEventFlux;
+        }).bufferUntil(buffer -> {
+            uploadState.partBuffered += buffer.readableByteCount();
+            uploadState.sizeBuffered += buffer.readableByteCount();
+            if (uploadState.partBuffered >= minioClientConfig.getMultipartMinPartSize() * Math.pow(1024, 2)) {
+                log.info("[I173] bufferUntil: returning true, sizeBuffered= {}, bufferedBytes={}, partCounter={}, uploadId={}", uploadState.sizeBuffered, uploadState.partBuffered, uploadState.partCounter, uploadState.uploadId);
+                uploadState.partBuffered = 0;
+                return true;
+            } else {
+                return false;
+            }
+        }).flatMap(dataBuffers -> {
+            if (uploadState.sizeBuffered > minioClientConfig.getMaxFileSize() * Math.pow(1024, 2)) {
+                return Mono.when(abortMultipartUpload(uploadState)).then(Mono.error(new UploadFileExceededMaxAllowedSizeException(fileMetaData)));
+            }
+            return Mono.just(dataBuffers);
+        }).map(S3StorageFileSystemImpl::concatBuffers).flatMap(buffer -> uploadPart(uploadState, buffer).subscribeOn(Schedulers.boundedElastic())).reduce(uploadState, (state, completedPart) -> {
+            state.completedParts.put(completedPart.partNumber(), completedPart);
+            return state;
+        }).flatMap(this::completeUpload).map(response -> {
+            checkResult(response, uploadState.fileKey);
+            return uploadState.fileKey;
+        }).flatMap(s -> Mono.just(new ResourceCreated(s))));
 
 
     }
@@ -153,50 +134,27 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
         final int partNumber = ++uploadState.partCounter;
         log.info("[I218] uploadPart: partNumber={}, contentLength={}", partNumber, buffer.capacity());
 
-        CompletableFuture<UploadPartResponse> request = s3Client.uploadPart(UploadPartRequest.builder()
-                        .bucket(uploadState.bucket)
-                        .key(uploadState.fileKey)
-                        .partNumber(partNumber)
-                        .uploadId(uploadState.uploadId)
-                        .contentLength((long) buffer.capacity())
-                        .build(),
-                AsyncRequestBody.fromPublisher(Mono.just(buffer)));
+        CompletableFuture<UploadPartResponse> request = s3Client.uploadPart(UploadPartRequest.builder().bucket(uploadState.bucket).key(uploadState.fileKey).partNumber(partNumber).uploadId(uploadState.uploadId).contentLength((long) buffer.capacity()).build(), AsyncRequestBody.fromPublisher(Mono.just(buffer)));
 
-        return Mono
-                .fromFuture(request)
-                .map(uploadPartResult -> {
-                    checkResult(uploadPartResult, uploadState.fileKey);
-                    log.info("[I230] uploadPart complete: part={}, etag={}", partNumber, uploadPartResult.eTag());
-                    return CompletedPart.builder()
-                            .eTag(uploadPartResult.eTag())
-                            .partNumber(partNumber)
-                            .build();
-                });
+        return Mono.fromFuture(request).map(uploadPartResult -> {
+            checkResult(uploadPartResult, uploadState.fileKey);
+            log.info("[I230] uploadPart complete: part={}, etag={}", partNumber, uploadPartResult.eTag());
+            return CompletedPart.builder().eTag(uploadPartResult.eTag()).partNumber(partNumber).build();
+        });
     }
 
     private Mono<CompleteMultipartUploadResponse> completeUpload(UploadState state) {
         log.info("[I202] completeUpload: bucket={}, fileKey={}, completedParts.size={}", state.bucket, state.fileKey, state.completedParts.size());
 
-        CompletedMultipartUpload multipartUpload = CompletedMultipartUpload.builder()
-                .parts(state.completedParts.values())
-                .build();
+        CompletedMultipartUpload multipartUpload = CompletedMultipartUpload.builder().parts(state.completedParts.values()).build();
 
-        return Mono.fromFuture(s3Client.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
-                .bucket(state.bucket)
-                .uploadId(state.uploadId)
-                .multipartUpload(multipartUpload)
-                .key(state.fileKey)
-                .build()));
+        return Mono.fromFuture(s3Client.completeMultipartUpload(CompleteMultipartUploadRequest.builder().bucket(state.bucket).uploadId(state.uploadId).multipartUpload(multipartUpload).key(state.fileKey).build()));
     }
 
     private Mono<AbortMultipartUploadResponse> abortMultipartUpload(UploadState state) {
         log.info("[I202] abortMultipartUpload: bucket={}, fileKey={}, completedParts.size={}", state.bucket, state.fileKey, state.completedParts.size());
 
-        return Mono.fromFuture(s3Client.abortMultipartUpload(AbortMultipartUploadRequest.builder()
-                .bucket(state.bucket)
-                .uploadId(state.uploadId)
-                .key(state.fileKey)
-                .build()));
+        return Mono.fromFuture(s3Client.abortMultipartUpload(AbortMultipartUploadRequest.builder().bucket(state.bucket).uploadId(state.uploadId).key(state.fileKey).build()));
     }
 
     /**
@@ -240,51 +198,35 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
     public Mono<ResponseEntity<Flux<ByteBuffer>>> downloadFile(UUID fileId) {
 
         var fileKey = fileId.toString();
-        GetObjectRequest request = GetObjectRequest.builder()
-                .bucket(minioClientConfig.getBucketName())
-                .key(fileKey)
-                .build();
+        GetObjectRequest request = GetObjectRequest.builder().bucket(minioClientConfig.getBucketName()).key(fileKey).build();
 
 
-        return Mono.fromFuture(s3Client.getObject(request, AsyncResponseTransformer.toPublisher()))
-                .map(response -> {
-                    checkResult(response.response(), fileKey);
-                    String filename = getMetadataItem(response.response(), "filename", fileKey);
+        return Mono.fromFuture(s3Client.getObject(request, AsyncResponseTransformer.toPublisher())).map(response -> {
+            checkResult(response.response(), fileKey);
+            String filename = getMetadataItem(response.response(), "filename", fileKey);
 
-                    log.info("[I65] filename={}, length={}", filename, response.response()
-                            .contentLength());
+            log.info("[I65] filename={}, length={}", filename, response.response().contentLength());
 
-                    return ResponseEntity.ok()
-                            .header(HttpHeaders.CONTENT_TYPE, response.response()
-                                    .contentType())
-                            .header(HttpHeaders.CONTENT_LENGTH, Long.toString(response.response()
-                                    .contentLength()))
-                            .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
-                            .body(Flux.from(response));
+            return ResponseEntity.ok().header(HttpHeaders.CONTENT_TYPE, response.response().contentType()).header(HttpHeaders.CONTENT_LENGTH, Long.toString(response.response().contentLength())).header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"").body(Flux.from(response));
 
-                }).doOnError(throwable -> {
-                    log.error(throwable.getMessage(), throwable);
-                    if (throwable instanceof NoSuchKeyException) {
-                        throw new FileNotFoundException();
-                    }
-                    throw new DownloadFailedException();
-                });
+        }).doOnError(throwable -> {
+            log.error(throwable.getMessage(), throwable);
+            if (throwable instanceof NoSuchKeyException) {
+                throw new FileNotFoundException();
+            }
+            throw new DownloadFailedException();
+        });
     }
 
     @SneakyThrows
     public Mono<ResourceDeleted> deleteFile(UUID fileId) {
 
-        DeleteObjectRequest request = DeleteObjectRequest.builder()
-                .bucket(minioClientConfig.getBucketName())
-                .key(fileId.toString())
-                .build();
+        DeleteObjectRequest request = DeleteObjectRequest.builder().bucket(minioClientConfig.getBucketName()).key(fileId.toString()).build();
 
-        return
-                Mono.fromFuture(s3Client.deleteObject(request))
-                        .map(response -> {
-                            checkResult(response, fileId.toString());
-                            return new ResourceDeleted(true);
-                        });
+        return Mono.fromFuture(s3Client.deleteObject(request)).map(response -> {
+            checkResult(response, fileId.toString());
+            return new ResourceDeleted(true);
+        });
     }
 
 
@@ -292,10 +234,8 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
 
 
     private String getMetadataItem(GetObjectResponse sdkResponse, String key, String defaultValue) {
-        for (Map.Entry<String, String> entry : sdkResponse.metadata()
-                .entrySet()) {
-            if (entry.getKey()
-                    .equalsIgnoreCase(key)) {
+        for (Map.Entry<String, String> entry : sdkResponse.metadata().entrySet()) {
+            if (entry.getKey().equalsIgnoreCase(key)) {
                 return entry.getValue();
             }
         }

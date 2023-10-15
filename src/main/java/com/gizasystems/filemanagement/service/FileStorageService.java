@@ -50,10 +50,10 @@ public class FileStorageService {
             metadata.put("mime_type", mt.toString());
             metadata.put("extension", getFileExtension(filename));
 
-            var validMimeType = fileType.checkMimeType(mt.toString());
-            if (!validMimeType) {
-                throw new InvalidFileTypeException(metadata);
-            }
+//            var validMimeType = fileType.checkMimeType(mt.toString());
+//            if (!validMimeType) {
+//                throw new InvalidFileTypeException(metadata);
+//            }
 
             log.info("upload file name:{}", filename);
             Flux<DataBuffer> contents = partEvents.map(PartEvent::content);
