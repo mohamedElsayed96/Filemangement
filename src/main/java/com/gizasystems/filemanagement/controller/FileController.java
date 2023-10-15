@@ -2,10 +2,10 @@ package com.gizasystems.filemanagement.controller;
 
 import com.gizasystems.filemanagement.enums.FileType;
 import com.gizasystems.filemanagement.models.ResourceCreated;
+import com.gizasystems.filemanagement.models.ResourceDeleted;
 import com.gizasystems.filemanagement.models.Response;
-import com.gizasystems.filemanagement.service.DownloadFileService;
-import com.gizasystems.filemanagement.service.UploadFileService;
 import com.gizasystems.filemanagement.service.BaseController;
+import com.gizasystems.filemanagement.service.FileStorageService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.context.annotation.Configuration;
@@ -26,20 +26,24 @@ import java.util.UUID;
 public class FileController extends BaseController {
 
 
-    private final UploadFileService uploadFileService;
-    private final DownloadFileService downloadFileService;
+    private final FileStorageService fileStorageService;
 
 
     @PostMapping()
     public Mono<ResponseEntity<Response<ResourceCreated>>> uploadFile(@RequestParam("fileId") UUID fileId,
                                                                       @RequestParam("fileType") FileType fileType,
                                                                       @RequestBody Flux<PartEvent> filePartFlux) {
-        return formatResponse(uploadFileService.uploadFile(fileId, fileType, filePartFlux));
+        return formatResponse(fileStorageService.uploadFile(fileId, fileType, filePartFlux));
 
     }
     @GetMapping(path = "/{fileId}")
     public Mono<ResponseEntity<Flux<ByteBuffer>>> downloadFile(@PathVariable("fileId") UUID fileId) {
 
-        return downloadFileService.downloadFile(fileId);
+        return fileStorageService.downloadFile(fileId);
+    }
+    @DeleteMapping(path = "/{fileId}")
+    public Mono<ResponseEntity<Response<ResourceDeleted>>> deleteFile(@PathVariable("fileId") UUID fileId) {
+
+        return formatResponse(fileStorageService.deleteFile(fileId));
     }
 }

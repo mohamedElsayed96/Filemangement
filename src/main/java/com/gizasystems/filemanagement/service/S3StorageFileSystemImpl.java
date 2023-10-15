@@ -3,11 +3,14 @@ package com.gizasystems.filemanagement.service;
 import com.gizasystems.filemanagement.exceptions.*;
 import com.gizasystems.filemanagement.infrastructure.MinioClientConfig;
 import com.gizasystems.filemanagement.models.ResourceCreated;
+import com.gizasystems.filemanagement.models.ResourceDeleted;
 import lombok.RequiredArgsConstructor;
+import lombok.SneakyThrows;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.context.annotation.Profile;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
@@ -93,9 +96,13 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
                         .bucket(minioClientConfig.getBucketName())
                         .build());
         return Mono
-                .fromFuture(s3Client.headObject(headObjectRequest)).doOnError(throwable -> {
-                    log.error(throwable.getMessage(), throwable);
-                    throw new FileAlreadyExistException();
+                .fromFuture(s3Client.headObject(headObjectRequest))
+                .flatMap(headObjectResponse -> {
+                   return Mono.error(new FileAlreadyExistException());
+                })
+                .onErrorResume(throwable -> {
+                     if(throwable instanceof FileAlreadyExistException ex) throw ex;
+                    return Mono.empty();
                 })
                 .then(Mono.fromFuture(uploadRequest)
                         .flatMapMany(response -> {
@@ -215,6 +222,20 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
 
     }
 
+    private static void checkResult(DeleteObjectResponse response, String fileId) {
+        SdkHttpResponse sdkResponse = response.sdkHttpResponse();
+        if (sdkResponse != null && sdkResponse.isSuccessful()) {
+            return;
+        }
+        if (sdkResponse != null) {
+            log.error("file_id---> {} Failed To be Deleted due to {} with status {}", fileId, sdkResponse.statusText().orElse("Unknown Error"), sdkResponse.statusCode());
+        } else {
+            log.error("file_id---> {} Failed To be Deleted due to Unknown Error", fileId);
+
+        }
+        throw new DeleteFailedException();
+    }
+
     @Override
     public Mono<ResponseEntity<Flux<ByteBuffer>>> downloadFile(UUID fileId) {
 
@@ -249,6 +270,26 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
                     throw new DownloadFailedException();
                 });
     }
+
+    @SneakyThrows
+    public Mono<ResourceDeleted> deleteFile(UUID fileId) {
+
+        DeleteObjectRequest request = DeleteObjectRequest.builder()
+                .bucket(minioClientConfig.getBucketName())
+                .key(fileId.toString())
+                .build();
+
+        return
+                Mono.fromFuture(s3Client.deleteObject(request))
+                        .map(response -> {
+                            checkResult(response, fileId.toString());
+                            return new ResourceDeleted(true);
+                        });
+    }
+
+
+    // Helper used to check return codes from an API call
+
 
     private String getMetadataItem(GetObjectResponse sdkResponse, String key, String defaultValue) {
         for (Map.Entry<String, String> entry : sdkResponse.metadata()

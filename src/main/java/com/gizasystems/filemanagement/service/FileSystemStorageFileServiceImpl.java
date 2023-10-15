@@ -2,12 +2,10 @@ package com.gizasystems.filemanagement.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.gizasystems.filemanagement.exceptions.FileAlreadyExistException;
-import com.gizasystems.filemanagement.exceptions.FileNotFoundException;
-import com.gizasystems.filemanagement.exceptions.UploadFailedException;
-import com.gizasystems.filemanagement.exceptions.UploadFileExceededMaxAllowedSizeException;
+import com.gizasystems.filemanagement.exceptions.*;
 import com.gizasystems.filemanagement.infrastructure.FileSystemConfig;
 import com.gizasystems.filemanagement.models.ResourceCreated;
+import com.gizasystems.filemanagement.models.ResourceDeleted;
 import lombok.RequiredArgsConstructor;
 import lombok.SneakyThrows;
 import lombok.extern.log4j.Log4j2;
@@ -30,10 +28,13 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Map;
 import java.util.UUID;
+
 /**
  * Author: Mohamed Eid
  * Date: October 1, 2023,
@@ -88,7 +89,7 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
                         throw new UploadFailedException();
                     }
                     return true;
-                })).map(Tuple2::getT1)
+                }).subscribeOn(Schedulers.boundedElastic())).map(Tuple2::getT1)
                 .onErrorResume(ex -> {
                     if (file.exists()) file.delete();
                     if (metaFile.exists()) metaFile.delete();
@@ -133,6 +134,35 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
                     .body(responseBody));
         }
         throw new FileNotFoundException();
+    }
+
+    @Override
+    public Mono<ResourceDeleted> deleteFile(UUID fileId) {
+        var filename = fileId.toString();
+        var metaFilename = fileId + "_meta.txt";
+
+
+        Path filePath = Paths.get(fileSystemConfig.getStoragePath(), filename);
+        Path metafilePath = Paths.get(fileSystemConfig.getMetaStoragePath(), metaFilename);
+
+        return Mono.fromCallable(() -> {
+                    Files.delete(filePath);
+                    return true;
+                })
+                .subscribeOn(Schedulers.boundedElastic())
+                .zipWith(Mono.fromCallable(() -> {
+                    Files.delete(metafilePath);
+                    return true;
+                }).subscribeOn(Schedulers.boundedElastic()))
+                .onErrorResume(throwable -> {
+                    log.error(throwable.getMessage(), throwable);
+                    if(throwable instanceof NoSuchFileException) throw new FileNotFoundException();
+                    throw new DeleteFailedException();
+                })
+                .map(result -> new ResourceDeleted(true));
+
+
+
     }
 
     static class UploadState {
