@@ -42,10 +42,6 @@ public class MinioClientConfig {
 
     private long multipartMinPartSize ;
 
-    private long maxFileSize;
-
-
-
     @Bean
     public S3AsyncClient s3AsyncClient(AwsCredentialsProvider credentialsProvider) {
 

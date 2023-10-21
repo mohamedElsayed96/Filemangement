@@ -14,10 +14,6 @@ import org.springframework.context.annotation.PropertySource;
 @Profile({"filesystem"})
 @ConfigurationProperties("filesystem")
 public class FileSystemConfig {
-
-
-
-    private long maxFileSize;
     private String storagePath;
     private String metaStoragePath;
 }

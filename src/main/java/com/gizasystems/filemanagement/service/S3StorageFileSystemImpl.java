@@ -1,6 +1,7 @@
 package com.gizasystems.filemanagement.service;
 
 import com.gizasystems.filemanagement.exceptions.*;
+import com.gizasystems.filemanagement.infrastructure.MainConfig;
 import com.gizasystems.filemanagement.infrastructure.MinioClientConfig;
 import com.gizasystems.filemanagement.models.ResourceCreated;
 import com.gizasystems.filemanagement.models.ResourceDeleted;
@@ -43,6 +44,7 @@ import java.util.concurrent.CompletableFuture;
 public class S3StorageFileSystemImpl implements IStorageFileService {
     private final S3AsyncClient s3Client;
     private final MinioClientConfig minioClientConfig;
+    private final MainConfig mainConfig;
 
     private static ByteBuffer concatBuffers(List<DataBuffer> buffers) {
         log.info("[I198] creating BytBuffer from {} chunks", buffers.size());
@@ -108,7 +110,7 @@ public class S3StorageFileSystemImpl implements IStorageFileService {
                 return false;
             }
         }).flatMap(dataBuffers -> {
-            if (uploadState.sizeBuffered > minioClientConfig.getMaxFileSize() * Math.pow(1024, 2)) {
+            if (uploadState.sizeBuffered > mainConfig.getMaxFileSize() * Math.pow(1024, 2)) {
                 return Mono.when(abortMultipartUpload(uploadState)).then(Mono.error(new UploadFileExceededMaxAllowedSizeException(fileMetaData)));
             }
             return Mono.just(dataBuffers);

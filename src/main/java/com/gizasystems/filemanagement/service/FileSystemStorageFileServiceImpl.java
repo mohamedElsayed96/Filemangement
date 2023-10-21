@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gizasystems.filemanagement.exceptions.*;
 import com.gizasystems.filemanagement.infrastructure.FileSystemConfig;
+import com.gizasystems.filemanagement.infrastructure.MainConfig;
 import com.gizasystems.filemanagement.models.ResourceCreated;
 import com.gizasystems.filemanagement.models.ResourceDeleted;
 import lombok.RequiredArgsConstructor;
@@ -47,6 +48,7 @@ import java.util.UUID;
 public class FileSystemStorageFileServiceImpl implements IStorageFileService {
 
     private final FileSystemConfig fileSystemConfig;
+    private final MainConfig mainConfig;
     private final ObjectMapper objectMapper;
 
     @Override
@@ -75,7 +77,7 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
 
         return DataBufferUtils.write(partEventFlux, outputStream).flatMap(dataBuffer -> {
                     uploadState.sizeBuffered += dataBuffer.readableByteCount();
-                    if (uploadState.sizeBuffered > fileSystemConfig.getMaxFileSize() * Math.pow(1024, 2)) {
+                    if (uploadState.sizeBuffered > mainConfig.getMaxFileSize() * Math.pow(1024, 2)) {
                         DataBufferUtils.release(dataBuffer);
                         return Mono.error(new UploadFileExceededMaxAllowedSizeException(fileMetaData));
                     }

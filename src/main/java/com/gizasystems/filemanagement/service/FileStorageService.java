@@ -1,8 +1,8 @@
 package com.gizasystems.filemanagement.service;
 
-import com.gizasystems.filemanagement.enums.FileType;
 import com.gizasystems.filemanagement.exceptions.InvalidFileTypeException;
 import com.gizasystems.filemanagement.exceptions.UploadDataNotFileException;
+import com.gizasystems.filemanagement.infrastructure.MainConfig;
 import com.gizasystems.filemanagement.models.ResourceCreated;
 import com.gizasystems.filemanagement.models.ResourceDeleted;
 import lombok.RequiredArgsConstructor;
@@ -22,15 +22,19 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.UUID;
-
+/**
+ * Author: Mohamed Eid
+ * Date: October 1, 2023,
+ * Description: Template Class.
+ */
 @Service
 @RequiredArgsConstructor
 @Log4j2
 public class FileStorageService {
     private final IStorageFileService storageFileService;
+    private final MainConfig mainConfig;
 
     public Mono<ResourceCreated> uploadFile(UUID fileId,
-                                            FileType fileType,
                                             Flux<PartEvent> files) {
 
 
@@ -50,10 +54,10 @@ public class FileStorageService {
             metadata.put("mime_type", mt.toString());
             metadata.put("extension", getFileExtension(filename));
 
-//            var validMimeType = fileType.checkMimeType(mt.toString());
-//            if (!validMimeType) {
-//                throw new InvalidFileTypeException(metadata);
-//            }
+            var validMimeType = mainConfig.getAllowedMimeTypes().contains(mt.toString());
+            if (!validMimeType) {
+                throw new InvalidFileTypeException(metadata);
+            }
 
             log.info("upload file name:{}", filename);
             Flux<DataBuffer> contents = partEvents.map(PartEvent::content);

@@ -8,7 +8,11 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
-
+/**
+ * Author: Mohamed Eid
+ * Date: October 1, 2023,
+ * Description: Base Controller to format reactive response.
+ */
 public abstract class BaseController {
 
 

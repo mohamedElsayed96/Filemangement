@@ -18,7 +18,11 @@ import org.springframework.web.bind.support.WebExchangeBindException;
 import reactor.core.publisher.Mono;
 
 import java.util.*;
-
+/**
+ * Author: Mohamed Eid
+ * Date: October 1, 2023,
+ * Description: Global Exception Handler to handle reactive exception.
+ */
 @RestControllerAdvice
 @Log4j2
 public class GlobalExceptionHandlers extends BaseController {

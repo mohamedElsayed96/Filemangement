@@ -1,6 +1,5 @@
 package com.gizasystems.filemanagement.controller;
 
-import com.gizasystems.filemanagement.enums.FileType;
 import com.gizasystems.filemanagement.models.ResourceCreated;
 import com.gizasystems.filemanagement.models.ResourceDeleted;
 import com.gizasystems.filemanagement.models.Response;
@@ -31,9 +30,8 @@ public class FileController extends BaseController {
 
     @PostMapping()
     public Mono<ResponseEntity<Response<ResourceCreated>>> uploadFile(@RequestParam("fileId") UUID fileId,
-                                                                      @RequestParam("fileType") FileType fileType,
                                                                       @RequestBody Flux<PartEvent> filePartFlux) {
-        return formatResponse(fileStorageService.uploadFile(fileId, fileType, filePartFlux));
+        return formatResponse(fileStorageService.uploadFile(fileId, filePartFlux));
 
     }
     @GetMapping(path = "/{fileId}")
