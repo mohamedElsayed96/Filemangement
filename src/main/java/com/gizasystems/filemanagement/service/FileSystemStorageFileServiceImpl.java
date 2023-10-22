@@ -94,27 +94,28 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
                 }).subscribeOn(Schedulers.boundedElastic())).map(Tuple2::getT1)
                 .onErrorResume(ex ->
                         Mono.fromCallable(() -> {
-                            if (Files.exists(filePath)) {
-                                try {
-                                    outputStream.close();
-                                    Files.delete(filePath);
-                                } catch (IOException e) {
-                                    log.error(e.getMessage(), e);
-                                }
-                            }
-                            return true;
+                                    if (Files.exists(filePath)) {
+                                        try {
+                                            outputStream.close();
+                                            Files.delete(filePath);
+                                        } catch (IOException e) {
+                                            log.error(e.getMessage(), e);
+                                        }
+                                    }
+                                    return true;
 
-                        }).subscribeOn(Schedulers.boundedElastic()).zipWith(Mono.fromCallable(() -> {
-                            if (Files.exists(metafilePath)) {
-                                try {
-                                    metaOutputStream.close();
-                                    Files.delete(metafilePath);
-                                } catch (IOException e) {
-                                    log.error(e.getMessage(), e);
-                                }
-                            }
-                            return true;
-                        }).subscribeOn(Schedulers.boundedElastic())).flatMap(objects -> Mono.error(ex))
+                                }).subscribeOn(Schedulers.boundedElastic())
+                                .zipWith(Mono.fromCallable(() -> {
+                                    if (Files.exists(metafilePath)) {
+                                        try {
+                                            metaOutputStream.close();
+                                            Files.delete(metafilePath);
+                                        } catch (IOException e) {
+                                            log.error(e.getMessage(), e);
+                                        }
+                                    }
+                                    return true;
+                                }).subscribeOn(Schedulers.boundedElastic())).flatMap(objects -> Mono.error(ex))
 
                 )
                 .doFinally(signalType -> {
@@ -137,25 +138,27 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
         Path filePath = Paths.get(fileSystemConfig.getStoragePath(), fileId.toString());
 
         Resource resource = new FileSystemResource(filePath.toFile());
-        if (resource.exists() || resource.isReadable()) {
-            var metaData = objectMapper.readValue(metaFilePath.toFile(), new TypeReference<Map<String, String>>() {
-            });
-            var fileSize = metaData.get("file_size");
-            var responseBody = DataBufferUtils.read(resource, new DefaultDataBufferFactory(), 1024).map(dataBuffer -> {
+        if (!(resource.exists() || resource.isReadable())) {
+            throw new FileNotFoundException();
 
-                ByteBuffer partData = ByteBuffer.allocate(1024);
-                dataBuffer.toByteBuffer(partData);
-                DataBufferUtils.release(dataBuffer);
-                return partData;
-            });
-            return Mono.just(ResponseEntity.ok()
-                    .header(HttpHeaders.CONTENT_TYPE, metaData.get("mime_type"))
-                    .header(HttpHeaders.CONTENT_LENGTH, fileSize)
-                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + metaData.get("filename") + "\"")
-                    .body(responseBody));
         }
-        throw new FileNotFoundException();
+        var metaData = objectMapper.readValue(metaFilePath.toFile(), new TypeReference<Map<String, String>>() {
+        });
+        var fileSize = metaData.get("file_size");
+        var responseBody = DataBufferUtils.read(resource, new DefaultDataBufferFactory(), 1024).map(dataBuffer -> {
+
+            ByteBuffer partData = ByteBuffer.allocate(1024);
+            dataBuffer.toByteBuffer(partData);
+            DataBufferUtils.release(dataBuffer);
+            return partData;
+        });
+        return Mono.just(ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_TYPE, metaData.get("mime_type"))
+                .header(HttpHeaders.CONTENT_LENGTH, fileSize)
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + metaData.get("filename") + "\"")
+                .body(responseBody));
     }
+
 
     @Override
     public Mono<ResourceDeleted> deleteFile(UUID fileId) {
