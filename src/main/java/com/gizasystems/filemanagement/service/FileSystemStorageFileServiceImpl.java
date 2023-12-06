@@ -77,8 +77,8 @@ public class FileSystemStorageFileServiceImpl implements IStorageFileService {
 
         return DataBufferUtils.write(partEventFlux, outputStream).flatMap(dataBuffer -> {
                     uploadState.sizeBuffered += dataBuffer.readableByteCount();
+                    DataBufferUtils.release(dataBuffer);
                     if (uploadState.sizeBuffered > mainConfig.getMaxFileSize() * Math.pow(1024, 2)) {
-                        DataBufferUtils.release(dataBuffer);
                         return Mono.error(new UploadFileExceededMaxAllowedSizeException(fileMetaData));
                     }
                     return Mono.just(new ResourceCreated(fileId.toString()));
